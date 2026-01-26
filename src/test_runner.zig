@@ -15,8 +15,15 @@ pub fn main() !void {
     var failed: usize = 0;
     var skipped: usize = 0;
 
-    const input_dir = try std.fs.cwd().openDir(try std.fs.path.join(allocator, &.{ test_dir, "input" }), .{ .iterate = true });
-    const expected_dir = try std.fs.cwd().openDir(try std.fs.path.join(allocator, &.{ test_dir, "expected_kdl" }), .{});
+    const input_path = try std.fs.path.join(allocator, &.{ test_dir, "input" });
+    defer allocator.free(input_path);
+    const expected_path = try std.fs.path.join(allocator, &.{ test_dir, "expected_kdl" });
+    defer allocator.free(expected_path);
+
+    var input_dir = try std.fs.cwd().openDir(input_path, .{ .iterate = true });
+    defer input_dir.close();
+    var expected_dir = try std.fs.cwd().openDir(expected_path, .{});
+    defer expected_dir.close();
 
     var dir_iter = input_dir.iterate();
     while (try dir_iter.next()) |entry| {

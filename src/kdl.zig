@@ -12,6 +12,8 @@ pub const Value = union(enum) {
         value: f64,
         has_exponent: bool = false,
         has_decimal: bool = true,
+        /// Raw string representation for values that overflow/underflow f64
+        raw: ?[]const u8 = null,
     };
 
     pub fn asString(self: Value) ?[]const u8 {
@@ -55,7 +57,10 @@ pub const Value = union(enum) {
             .string => |s| try writeEscapedString(writer, s),
             .integer => |i| try writer.print("{d}", .{i}),
             .float => |fv| {
-                if (std.math.isNan(fv.value)) {
+                // If we have a raw string (for overflow/underflow), use it
+                if (fv.raw) |raw| {
+                    try writer.writeAll(raw);
+                } else if (std.math.isNan(fv.value)) {
                     try writer.writeAll("#nan");
                 } else if (std.math.isPositiveInf(fv.value)) {
                     try writer.writeAll("#inf");
@@ -2049,10 +2054,19 @@ pub const Parser = struct {
             }
         }
         const value = std.fmt.parseFloat(f64, clean[0..len]) catch return error.InvalidNumber;
+
+        // Check for overflow/underflow - if the parsed value is inf or 0 but the input
+        // was a finite non-zero number, we need to preserve the raw string
+        const needs_raw = (std.math.isInf(value) or (value == 0 and has_exponent)) and
+            !std.mem.eql(u8, clean[0..len], "0.0") and
+            !std.mem.startsWith(u8, clean[0..len], "inf") and
+            !std.mem.startsWith(u8, clean[0..len], "-inf");
+
         return .{
             .value = value,
             .has_exponent = has_exponent,
             .has_decimal = has_decimal,
+            .raw = if (needs_raw) text else null,
         };
     }
 };
