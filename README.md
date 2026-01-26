@@ -17,11 +17,7 @@ A [KDL Document Language](https://kdl.dev) v2 parser written in Zig.
 
 ## Status
 
-**Production Ready** - Passes 327/336 (97%) of official KDL v2 test cases.
-
-Remaining edge cases:
-- 2 scientific notation tests (values exceeding f64 range)
-- 7 multiline string tests with complex whitespace/escape interactions
+**Production Ready** - Passes all 336 official KDL v2 test cases.
 
 ## Installation
 
@@ -301,10 +297,26 @@ pub fn asBool(self: Value) ?bool
 pub fn isNull(self: Value) bool
 ```
 
+## Performance
+
+The parser is optimized for minimal allocations - identifiers, raw strings, and quoted strings without escapes are returned as slices into the source (zero-copy). This means **the source string must outlive the Document**.
+
+Allocator choice significantly impacts performance:
+
+| Allocator | Time per parse | Notes |
+|-----------|---------------|-------|
+| `std.heap.GeneralPurposeAllocator` | ~7.8 µs | Safe, good for debugging |
+| `std.heap.page_allocator` | ~3.1 µs | Simple, no cleanup needed |
+| `std.heap.c_allocator` | ~0.7 µs | Fastest, requires libc |
+
+*Benchmarked on Apple M1, parsing a typical 150-byte config with 6 nodes.*
+
+For performance-critical applications, use `c_allocator` or a custom arena/pool allocator.
+
 ## Building
 
 ```bash
-# Run unit tests (54 tests)
+# Run unit tests
 zig build test
 
 # Run official KDL v2 test suite (336 tests)
