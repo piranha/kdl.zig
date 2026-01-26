@@ -1608,95 +1608,280 @@ pub const Parser = struct {
 
     fn processMultilineString(self: *Parser, tok: Token) ParseError![]const u8 {
         const text = self.tokenizer.source[tok.start..tok.end];
+        const alloc = self.arena.allocator();
+
         // """...""" format
         // Skip opening """ and first newline
         var start: usize = 3;
-        while (start < text.len and (text[start] == '\r' or text[start] == '\n')) {
-            if (text[start] == '\r' and start + 1 < text.len and text[start + 1] == '\n') {
-                start += 2;
-            } else {
-                start += 1;
-            }
-            break;
-        }
+        if (start < text.len and text[start] == '\r') start += 1;
+        if (start < text.len and text[start] == '\n') start += 1;
 
-        // Find closing """
+        // Content is between opening newline and closing """
         const end = text.len - 3;
-
-        // Get the content
         const content = text[start..end];
 
-        // Find the last line to get the indentation prefix
-        var last_newline: usize = content.len;
-        var i = content.len;
-        while (i > 0) {
-            i -= 1;
-            if (content[i] == '\n') {
-                last_newline = i + 1;
+        // Parse into lines, tracking indent and text separately
+        // This follows the Python kdlpy approach
+        const Line = struct {
+            indent: []const u8,
+            text: std.ArrayList(u8),
+        };
+
+        var lines: std.ArrayList(Line) = .empty;
+        var current_line = Line{
+            .indent = &.{},
+            .text = .empty,
+        };
+
+        var i: usize = 0;
+
+        // Consume initial whitespace as indent for first line
+        const indent_start = i;
+        while (i < content.len) {
+            if (isMultilineWhitespace(content, i)) |len| {
+                i += len;
+            } else {
                 break;
             }
         }
-        if (i == 0 and content.len > 0 and content[0] != '\n') {
-            last_newline = 0;
-        }
+        current_line.indent = content[indent_start..i];
 
-        const prefix = content[last_newline..];
+        // Parse content
+        while (i < content.len) {
+            const c = content[i];
 
-        // Process the content, removing prefix and handling escapes
-        const alloc = self.arena.allocator();
-        var result: std.ArrayList(u8) = .empty;
+            // Check for newline
+            if (c == '\n' or c == '\r') {
+                // Finish current line
+                try lines.append(alloc, current_line);
 
-        // Get the body content (excluding the final newline before the prefix line)
-        var body_end = last_newline;
-        if (body_end > 0 and content[body_end - 1] == '\n') {
-            body_end -= 1;
-            if (body_end > 0 and content[body_end - 1] == '\r') {
-                body_end -= 1;
-            }
-        }
-
-        var lines = std.mem.splitAny(u8, content[0..body_end], "\n");
-        var first = true;
-
-        while (lines.next()) |line| {
-            if (!first) {
-                try result.append(alloc, '\n');
-            }
-            first = false;
-
-            // Handle CR
-            var actual_line = line;
-            if (actual_line.len > 0 and actual_line[actual_line.len - 1] == '\r') {
-                actual_line = actual_line[0 .. actual_line.len - 1];
-            }
-
-            // Check if line is whitespace-only
-            var is_whitespace_only = true;
-            for (actual_line) |c| {
-                if (c != ' ' and c != '\t') {
-                    is_whitespace_only = false;
-                    break;
+                // Skip newline
+                if (c == '\r' and i + 1 < content.len and content[i + 1] == '\n') {
+                    i += 2;
+                } else {
+                    i += 1;
                 }
-            }
 
-            if (is_whitespace_only) {
-                // Empty line in output
+                // Start new line - capture indent
+                const new_indent_start = i;
+                while (i < content.len) {
+                    if (isMultilineWhitespace(content, i)) |len| {
+                        i += len;
+                    } else {
+                        break;
+                    }
+                }
+                current_line = Line{
+                    .indent = content[new_indent_start..i],
+                    .text = .empty,
+                };
                 continue;
             }
 
-            // Remove prefix
-            if (actual_line.len >= prefix.len and std.mem.startsWith(u8, actual_line, prefix)) {
-                actual_line = actual_line[prefix.len..];
-            } else if (prefix.len > 0) {
-                return error.MultilineStringIndentError;
+            // Check for escape
+            if (c == '\\' and i + 1 < content.len) {
+                const next = content[i + 1];
+                switch (next) {
+                    'n' => {
+                        try current_line.text.append(alloc, '\n');
+                        i += 2;
+                    },
+                    'r' => {
+                        try current_line.text.append(alloc, '\r');
+                        i += 2;
+                    },
+                    't' => {
+                        try current_line.text.append(alloc, '\t');
+                        i += 2;
+                    },
+                    '\\' => {
+                        try current_line.text.append(alloc, '\\');
+                        i += 2;
+                    },
+                    '"' => {
+                        try current_line.text.append(alloc, '"');
+                        i += 2;
+                    },
+                    'b' => {
+                        try current_line.text.append(alloc, 0x08);
+                        i += 2;
+                    },
+                    'f' => {
+                        try current_line.text.append(alloc, 0x0C);
+                        i += 2;
+                    },
+                    's' => {
+                        try current_line.text.append(alloc, ' ');
+                        i += 2;
+                    },
+                    'u' => {
+                        if (i + 2 < content.len and content[i + 2] == '{') {
+                            var ue = i + 3;
+                            while (ue < content.len and content[ue] != '}') {
+                                ue += 1;
+                            }
+                            if (ue >= content.len) return error.InvalidEscape;
+                            const hex = content[i + 3 .. ue];
+                            if (hex.len == 0 or hex.len > 6) return error.InvalidEscape;
+                            const codepoint = std.fmt.parseInt(u21, hex, 16) catch return error.InvalidEscape;
+                            var buf: [4]u8 = undefined;
+                            const len = std.unicode.utf8Encode(codepoint, &buf) catch return error.InvalidEscape;
+                            try current_line.text.appendSlice(alloc, buf[0..len]);
+                            i = ue + 1;
+                        } else {
+                            return error.InvalidEscape;
+                        }
+                    },
+                    ' ', '\t', '\n', '\r' => {
+                        // Whitespace escape - consume backslash and all following whitespace/newlines
+                        i += 1; // skip backslash
+                        while (i < content.len) {
+                            if (isMultilineWhitespace(content, i)) |len| {
+                                i += len;
+                            } else if (content[i] == '\n' or content[i] == '\r') {
+                                // Consume newline
+                                if (content[i] == '\r' and i + 1 < content.len and content[i + 1] == '\n') {
+                                    i += 2;
+                                } else {
+                                    i += 1;
+                                }
+                                // Consume indent of next line (will be stripped later anyway)
+                                while (i < content.len) {
+                                    if (isMultilineWhitespace(content, i)) |len| {
+                                        i += len;
+                                    } else {
+                                        break;
+                                    }
+                                }
+                            } else {
+                                break;
+                            }
+                        }
+                    },
+                    else => {
+                        // Check for unicode whitespace
+                        if (isMultilineWhitespace(content, i + 1)) |_| {
+                            i += 1;
+                            while (i < content.len) {
+                                if (isMultilineWhitespace(content, i)) |len| {
+                                    i += len;
+                                } else if (content[i] == '\n' or content[i] == '\r') {
+                                    if (content[i] == '\r' and i + 1 < content.len and content[i + 1] == '\n') {
+                                        i += 2;
+                                    } else {
+                                        i += 1;
+                                    }
+                                    while (i < content.len) {
+                                        if (isMultilineWhitespace(content, i)) |len2| {
+                                            i += len2;
+                                        } else {
+                                            break;
+                                        }
+                                    }
+                                } else {
+                                    break;
+                                }
+                            }
+                        } else {
+                            return error.InvalidEscape;
+                        }
+                    },
+                }
+                continue;
             }
 
-            // Process escapes in this line
-            const processed = try self.processEscapes(actual_line);
-            try result.appendSlice(alloc, processed);
+            // Regular character
+            try current_line.text.append(alloc, c);
+            i += 1;
+        }
+
+        // current_line is the "last line" (closing line) - its indent is the prefix
+        // and its text must be empty (only whitespace allowed before """)
+        const last_line = current_line;
+        if (last_line.text.items.len > 0) {
+            return error.MultilineStringIndentError;
+        }
+
+        const prefix = last_line.indent;
+
+        // Process lines: strip prefix, handle whitespace-only lines
+        var result: std.ArrayList(u8) = .empty;
+        for (lines.items, 0..) |*line, idx| {
+            if (idx > 0) {
+                try result.append(alloc, '\n');
+            }
+
+            // If line text is empty, it's whitespace-only - contributes just a newline
+            if (line.text.items.len == 0) {
+                continue;
+            }
+
+            // Strip prefix from indent
+            if (prefix.len > 0) {
+                if (line.indent.len >= prefix.len and std.mem.startsWith(u8, line.indent, prefix)) {
+                    // Write remaining indent after prefix
+                    try result.appendSlice(alloc, line.indent[prefix.len..]);
+                } else {
+                    // Indent doesn't match prefix - error
+                    return error.MultilineStringIndentError;
+                }
+            } else {
+                // No prefix, keep full indent
+                try result.appendSlice(alloc, line.indent);
+            }
+
+            // Write text
+            try result.appendSlice(alloc, line.text.items);
         }
 
         return result.toOwnedSlice(alloc);
+    }
+
+    fn isMultilineWhitespace(content: []const u8, pos: usize) ?usize {
+        if (pos >= content.len) return null;
+        const c = content[pos];
+
+        // Basic ASCII whitespace (not newlines)
+        if (c == ' ' or c == '\t') return 1;
+
+        // Check for multi-byte unicode whitespace
+        if (pos + 2 < content.len and c == 0xE2) {
+            if (content[pos + 1] == 0x80) {
+                const b2 = content[pos + 2];
+                // U+2000-U+200A
+                if (b2 >= 0x80 and b2 <= 0x8A) return 3;
+                // U+202F
+                if (b2 == 0xAF) return 3;
+            } else if (content[pos + 1] == 0x81 and content[pos + 2] == 0x9F) {
+                // U+205F
+                return 3;
+            }
+        }
+        // U+3000 ideographic space
+        if (pos + 2 < content.len and
+            c == 0xE3 and
+            content[pos + 1] == 0x80 and
+            content[pos + 2] == 0x80)
+        {
+            return 3;
+        }
+        // U+00A0 no-break space
+        if (pos + 1 < content.len and
+            c == 0xC2 and
+            content[pos + 1] == 0xA0)
+        {
+            return 2;
+        }
+        // U+1680 ogham space mark
+        if (pos + 2 < content.len and
+            c == 0xE1 and
+            content[pos + 1] == 0x9A and
+            content[pos + 2] == 0x80)
+        {
+            return 3;
+        }
+
+        return null;
     }
 
     fn processMultilineRawString(self: *Parser, tok: Token) ParseError![]const u8 {
@@ -1766,12 +1951,17 @@ pub const Parser = struct {
                 actual_line = actual_line[0 .. actual_line.len - 1];
             }
 
-            // Check if line is whitespace-only
+            // Check if line is whitespace-only (including unicode whitespace)
             var is_whitespace_only = true;
-            for (actual_line) |c| {
-                if (c != ' ' and c != '\t') {
-                    is_whitespace_only = false;
-                    break;
+            {
+                var j: usize = 0;
+                while (j < actual_line.len) {
+                    if (isMultilineWhitespace(actual_line, j)) |ws_len| {
+                        j += ws_len;
+                    } else {
+                        is_whitespace_only = false;
+                        break;
+                    }
                 }
             }
 
