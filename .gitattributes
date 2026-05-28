@@ -1,0 +1,7 @@
+# Keep KDL test suite fixtures byte-stable across platforms.
+# expected_kdl/* are deterministic outputs; force LF line endings on checkout.
+tests/test_cases/expected_kdl/** text eol=lf
+
+# input/* may intentionally contain CRLF (e.g. crlf_between_nodes.kdl) — do
+# not let git rewrite line endings for these.
+tests/test_cases/input/** -text

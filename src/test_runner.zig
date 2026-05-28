@@ -60,11 +60,16 @@ pub fn main() !void {
         }
 
         // Read expected output (if exists)
-        const expected_content = expected_dir.readFileAlloc(allocator, entry.name, 1024 * 1024) catch {
+        const expected_raw = expected_dir.readFileAlloc(allocator, entry.name, 1024 * 1024) catch {
             // No expected file - just check it parses
             passed += 1;
             continue;
         };
+        defer allocator.free(expected_raw);
+
+        // Normalize CRLF -> LF so the comparison is stable across platforms
+        // (git on Windows may check out text files with CRLF line endings).
+        const expected_content = try stripCr(allocator, expected_raw);
         defer allocator.free(expected_content);
 
         // Format our output
@@ -94,4 +99,15 @@ pub fn main() !void {
     if (failed > 0) {
         std.process.exit(1);
     }
+}
+
+fn stripCr(allocator: std.mem.Allocator, src: []const u8) ![]u8 {
+    var out = try allocator.alloc(u8, src.len);
+    var n: usize = 0;
+    for (src) |c| {
+        if (c == '\r') continue;
+        out[n] = c;
+        n += 1;
+    }
+    return allocator.realloc(out, n);
 }
