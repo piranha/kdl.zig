@@ -1,0 +1,13 @@
+.{
+    .name = .kdl,
+    .version = "0.1.0",
+    .fingerprint = 0xfe567e038e169de2, // Changing this has security and trust implications.
+    .minimum_zig_version = "0.15.2",
+    .dependencies = .{},
+    .paths = .{
+        "build.zig",
+        "build.zig.zon",
+        "src",
+        "README.md",
+    },
+}
