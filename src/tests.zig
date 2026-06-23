@@ -434,3 +434,124 @@ test "identifier string as prop value" {
     defer doc.deinit();
     try testing.expectEqualStrings("val", doc.nodes[0].getProp("prop").?.value.asString().?);
 }
+
+test "decode into nested structs rejects unknown fields" {
+    const Child = struct {
+        name: ?[]const u8 = null,
+        count: ?u8 = null,
+    };
+    const Config = struct {
+        enabled: ?bool = null,
+        child: Child = .{},
+    };
+
+    var decoded = try kdl.decodeInto(Config, testing.allocator,
+        \\enabled #true
+        \\child {
+        \\    name "cam\nera"
+        \\    count 7
+        \\}
+    );
+    defer decoded.deinit();
+    try testing.expectEqual(true, decoded.value.enabled.?);
+    try testing.expectEqualStrings("cam\nera", decoded.value.child.name.?);
+    try testing.expectEqual(@as(u8, 7), decoded.value.child.count.?);
+
+    try testing.expectError(error.InvalidField, kdl.decodeInto(Config, testing.allocator, "child { typo 1 }\n"));
+}
+
+test "decode owns source backing storage" {
+    const Config = struct { name: ?[]const u8 = null };
+
+    const source_text = "name camera\n";
+    const source = try testing.allocator.dupe(u8, source_text);
+    defer testing.allocator.free(source);
+
+    var decoded = try kdl.decodeInto(Config, testing.allocator, source);
+    defer decoded.deinit();
+
+    @memset(source, 'x');
+    try testing.expectEqualStrings("camera", decoded.value.name.?);
+}
+
+test "decode supports optional sections and custom scalars" {
+    const Mode = enum { low, high };
+    const Options = struct {
+        pub fn decodeScalar(comptime T: type, node: *const kdl.Node) !?T {
+            if (T == Mode) {
+                const text = try kdl.nodeString(node);
+                if (std.mem.eql(u8, text, "lo")) return .low;
+                if (std.mem.eql(u8, text, "hi")) return .high;
+                return error.InvalidField;
+            }
+            return null;
+        }
+    };
+    const Section = struct { mode: ?Mode = null };
+    const Config = struct { section: ?Section = null };
+
+    var decoded = try kdl.decodeIntoOptions(Config, testing.allocator,
+        \\section {
+        \\    mode "hi"
+        \\}
+    , Options);
+    defer decoded.deinit();
+    try testing.expectEqual(Mode.high, decoded.value.section.?.mode.?);
+}
+
+test "encode from struct roundtrips through decode" {
+    const Section = struct {
+        axis_name: []const u8 = "",
+        invert: bool = false,
+        deadzone: u8 = 0,
+    };
+    const Config = struct {
+        section: ?Section = null,
+    };
+    const cfg = Config{ .section = .{ .axis_name = "r", .invert = true, .deadzone = 12 } };
+
+    var list: std.ArrayList(u8) = .empty;
+    defer list.deinit(testing.allocator);
+    try kdl.encodeFrom(list.writer(testing.allocator), cfg);
+
+    var parsed = try kdl.decodeInto(Config, testing.allocator, list.items);
+    defer parsed.deinit();
+    try testing.expectEqualStrings("r", parsed.value.section.?.axis_name);
+    try testing.expect(parsed.value.section.?.invert);
+    try testing.expectEqual(@as(u8, 12), parsed.value.section.?.deadzone);
+}
+
+test "encode honors custom scalar structs" {
+    const Port = struct { value: u16 };
+    const Options = struct {
+        pub fn isScalar(comptime T: type) bool {
+            return T == Port;
+        }
+
+        pub fn encodeScalar(writer: anytype, value: anytype) !bool {
+            if (@TypeOf(value) == Port) {
+                try writer.print("{d}", .{value.value});
+                return true;
+            }
+            return false;
+        }
+    };
+    const Config = struct { port: Port = .{ .value = 123 } };
+
+    var list: std.ArrayList(u8) = .empty;
+    defer list.deinit(testing.allocator);
+    try kdl.encodeFromOptions(list.writer(testing.allocator), Config{}, Options);
+    try testing.expectEqualStrings("port 123\n", list.items);
+}
+
+test "encode supports Value and TypedValue scalar fields" {
+    const Config = struct {
+        raw: kdl.Value = .{ .integer = 42 },
+        typed: kdl.TypedValue = .{ .type_annotation = "u8", .value = .{ .integer = 7 } },
+    };
+
+    var list: std.ArrayList(u8) = .empty;
+    defer list.deinit(testing.allocator);
+    try kdl.encodeFrom(list.writer(testing.allocator), Config{});
+    try testing.expectEqualStrings("raw 42\ntyped (u8)7\n", list.items);
+}

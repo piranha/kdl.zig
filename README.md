@@ -57,6 +57,38 @@ pub fn main() !void {
 }
 ```
 
+## Struct decoding / encoding
+
+For config-shaped KDL, `decodeInto` maps kebab-case node names to snake_case
+struct fields, rejects unknown fields, and supports nested structs and optional
+fields. It returns a decoded value plus owned backing storage for borrowed
+string slices; call `deinit` when done. `encodeFrom` writes the same shape back
+out.
+
+```zig
+const Config = struct {
+    enabled: ?bool = null,
+    camera: ?struct {
+        width: ?u16 = null,
+        height: ?u16 = null,
+    } = null,
+};
+
+var decoded = try kdl.decodeInto(Config, allocator,
+    \\enabled #true
+    \\camera {
+    \\    width 1920
+    \\    height 1080
+    \\}
+);
+defer decoded.deinit();
+
+try kdl.encodeFrom(writer, decoded.value);
+```
+
+Use `decodeIntoOptions` / `encodeFromOptions` to provide custom scalar parsing,
+custom field-name matching, or indentation.
+
 ## Examples
 
 ### Parsing a Configuration File
